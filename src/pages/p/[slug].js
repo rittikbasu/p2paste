@@ -39,6 +39,18 @@ export default function PastePage() {
             "wss://y-webrtc-signaling-eu.herokuapp.com",
             "wss://y-webrtc-signaling-us.herokuapp.com",
           ],
+          peerOpts: {
+            config: {
+              iceServers: [
+                {
+                  urls: [
+                    "stun:stun.l.google.com:19302",
+                    "stun:global.stun.twilio.com:3478",
+                  ],
+                },
+              ],
+            },
+          },
         });
         entry = { doc, provider, refs: 0 };
         registry.set(roomName, entry);
