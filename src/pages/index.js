@@ -30,8 +30,8 @@ export default function Home() {
             P2Paste
           </h1>
           <p className="opacity-70 text-sm sm:text-base">
-            Realtime, peer‑to‑peer pastebin. Human‑readable links. No server
-            storage.
+            Realtime, peer‑to‑peer pastebin. No servers. No Database. No
+            Bullshit.
           </p>
           <div>
             <button
