@@ -21,47 +21,87 @@ export default function PastePage() {
     if (!slug) return;
 
     async function start() {
-      const [{ Doc }, { WebrtcProvider }, yTextarea] = await Promise.all([
-        import("yjs"),
-        import("y-webrtc"),
-        import("y-textarea"),
-      ]);
+      const [{ Doc, applyUpdate, encodeStateAsUpdate }, yTextarea, torrent] =
+        await Promise.all([
+          import("yjs"),
+          import("y-textarea"),
+          import("trystero/torrent"),
+        ]);
 
       const roomName = `p2paste-${slug}`;
-      const registry = (window.__p2paste_registry =
-        window.__p2paste_registry || new Map());
-      let entry = registry.get(roomName);
-      if (!entry) {
-        const doc = new Doc();
-        const provider = new WebrtcProvider(roomName, doc, {
-          signaling: [
-            "wss://signaling.yjs.dev",
-            "wss://y-webrtc-signaling-eu.herokuapp.com",
-            "wss://y-webrtc-signaling-us.herokuapp.com",
-          ],
-          peerOpts: {
-            config: {
-              iceServers: [
-                {
-                  urls: [
-                    "stun:stun.l.google.com:19302",
-                    "stun:global.stun.twilio.com:3478",
-                  ],
-                },
-              ],
-            },
-          },
-        });
-        entry = { doc, provider, refs: 0 };
-        registry.set(roomName, entry);
-      }
-      entry.refs += 1;
 
-      const { doc, provider } = entry;
+      // Create fresh Y.Doc and WebrtcProvider for each component instance
+      // This ensures proper document syncing across different browsers
+      const doc = new Doc();
+
       const ytext = doc.getText("content");
 
-      providerRef.current = provider;
-      awarenessRef.current = provider.awareness;
+      // Trystero setup (torrent backend uses public trackers, no server you manage)
+      const { joinRoom, defaultRelayUrls } = torrent;
+      const room = joinRoom(
+        {
+          appId: "p2paste",
+          relayUrls: defaultRelayUrls,
+          relayRedundancy: defaultRelayUrls.length,
+          rtcConfig: { iceCandidatePoolSize: 16 },
+        },
+        roomName
+      );
+      const [sendUpdate, onUpdate] = room.makeAction("yupdate");
+      const [sendFullState, onFullState] = room.makeAction("yfull");
+      const [sendRequestFull, onRequestFull] = room.makeAction("yreq");
+
+      // Broadcast local Yjs updates
+      doc.on("update", (update, origin) => {
+        // Avoid echoing remote updates
+        if (origin === "remote") return;
+        sendUpdate(update);
+      });
+
+      // Apply remote incremental updates
+      onUpdate((update, peerId) => {
+        try {
+          applyUpdate(doc, update, "remote");
+        } catch {}
+      });
+
+      // Handle receiving a full document state
+      onFullState((update, peerId) => {
+        try {
+          applyUpdate(doc, update, "remote");
+        } catch {}
+      });
+
+      // Presence: track peer joins/leaves and send full state to the new peer
+      room.onPeerJoin((peerId) => {
+        setConnectedPeers((n) => n + 1);
+        try {
+          const full = encodeStateAsUpdate(doc);
+          sendFullState(full, peerId);
+        } catch {}
+      });
+
+      // If we join and have empty doc, request full state from any peer
+      setTimeout(() => {
+        if ((ytext?.length || 0) === 0) {
+          try {
+            sendRequestFull({});
+          } catch {}
+        }
+      }, 100);
+
+      onRequestFull((_, fromPeerId) => {
+        // Respond with full state if we have content
+        if ((ytext?.length || 0) > 0) {
+          try {
+            const full = encodeStateAsUpdate(doc);
+            sendFullState(full, fromPeerId);
+          } catch {}
+        }
+      });
+      room.onPeerLeave(() => setConnectedPeers((n) => Math.max(1, n - 1)));
+      setConnectedPeers(1);
+      setConnected(true);
 
       // Bind to textarea
       const textarea = textareaRef.current;
@@ -70,23 +110,18 @@ export default function PastePage() {
         bindingRef.current = new TextAreaBinding(ytext, textarea);
       }
 
-      const onStatus = (event) => setConnected(Boolean(event?.connected));
-      const onPeers = (event) => {
-        const webrtc = event?.webrtcPeers?.length || 0;
-        const bc = event?.bcPeers?.length || 0;
-        // Include self to align with previous awareness-based count
-        setConnectedPeers(webrtc + bc + 1);
+      // Debug: log document changes locally
+      const onDocUpdate = (update, origin) => {
+        console.log("Doc update:", { textLength: ytext.length, origin });
+        const ta = textareaRef.current;
+        if (ta) {
+          ta.value = ytext.toString();
+        }
       };
-      provider.on("status", onStatus);
-      provider.on("peers", onPeers);
-      // Initialize immediately
-      onStatus({ connected: provider.connected });
-      // We don't know peers until we get first event; assume at least self
-      setConnectedPeers(1);
+      doc.on("update", onDocUpdate);
 
       return () => {
-        provider.off("status", onStatus);
-        provider.off("peers", onPeers);
+        doc.off("update", onDocUpdate);
         if (
           bindingRef.current &&
           typeof bindingRef.current.destroy === "function"
@@ -95,18 +130,9 @@ export default function PastePage() {
             bindingRef.current.destroy();
           } catch {}
         }
-        // Decrement ref count and clean up when last consumer leaves this room
-        const reg = window.__p2paste_registry;
-        const e = reg?.get(roomName);
-        if (e) {
-          e.refs -= 1;
-          if (e.refs <= 0) {
-            try {
-              e.provider.destroy();
-            } catch {}
-            reg.delete(roomName);
-          }
-        }
+        try {
+          room.leave();
+        } catch {}
         providerRef.current = null;
         awarenessRef.current = null;
         bindingRef.current = null;
@@ -163,7 +189,7 @@ export default function PastePage() {
         />
       </main>
       <footer className="text-xs opacity-60">
-        No database. No servers. No bullshit. Everything exists in your browser
+        No servers. No database. No bullshit. Everything exists in your browser
         only while you&apos;re here.
       </footer>
     </div>
