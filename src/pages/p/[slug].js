@@ -44,19 +44,42 @@ export default function PastePage() {
 
       const ytext = doc.getText("content");
 
-      // Trystero setup (torrent backend uses public trackers, no server you manage)
       const { joinRoom, getRelaySockets } = torrent;
+
+      const relayUrls = [
+        "wss://tracker.webtorrent.dev",
+        "wss://tracker.openwebtorrent.com",
+        "wss://tracker.files.fm:7073",
+      ];
+
+      const iceServers = [
+        {
+          urls: [
+            "stun:stun.l.google.com:19302",
+            "stun:stun1.l.google.com:19302",
+            "stun:stun2.l.google.com:19302",
+            "stun:stun3.l.google.com:19302",
+            "stun:stun4.l.google.com:19302",
+          ],
+        },
+        { urls: "stun:global.stun.twilio.com:3478" },
+      ];
+
+      console.info("[p2paste] using trackers", relayUrls);
+      console.info(
+        "[p2paste] using ICE servers",
+        iceServers.map((s) =>
+          typeof s.urls === "string" ? s.urls : s.urls?.join(", ")
+        )
+      );
+
       const room = joinRoom(
         {
           appId: "p2paste",
-          relayUrls: [
-            "wss://tracker.webtorrent.dev",
-            "wss://tracker.openwebtorrent.com",
-            "wss://tracker.btorrent.xyz",
-          ],
+          relayUrls,
           relayRedundancy: 3,
           // Keep RTC candidate pool small to avoid resource spikes during reconnects
-          rtcConfig: { iceCandidatePoolSize: 2 },
+          rtcConfig: { iceServers, iceCandidatePoolSize: 2 },
         },
         roomName
       );
@@ -98,7 +121,8 @@ export default function PastePage() {
       if (typeof offFull === "function") unsubsRef.current.push(offFull);
 
       // Presence: track peer joins/leaves and send full state to the new peer
-      const offJoin = room.onPeerJoin(() => {
+      const offJoin = room.onPeerJoin((peerId) => {
+        console.info("[p2paste] peer joined", peerId);
         setConnectedPeers((n) => {
           const next = n + 1;
           if (next > 0) setConnected(true);
@@ -117,6 +141,7 @@ export default function PastePage() {
       }, 0);
 
       const offReq = onRequestFull((_, fromPeerId) => {
+        console.info("[p2paste] received full-state request from", fromPeerId);
         // Always respond with full state (even if empty, to confirm connection)
         try {
           const full = encodeStateAsUpdate(doc);
@@ -129,13 +154,14 @@ export default function PastePage() {
         }
       });
       if (typeof offReq === "function") unsubsRef.current.push(offReq);
-      const offLeave = room.onPeerLeave(() =>
+      const offLeave = room.onPeerLeave((peerId) => {
+        console.info("[p2paste] peer left", peerId);
         setConnectedPeers((n) => {
           const next = Math.max(0, n - 1);
           if (next === 0) setConnected(false);
           return next;
-        })
-      );
+        });
+      });
       if (typeof offLeave === "function") unsubsRef.current.push(offLeave);
 
       // Bind to textarea
@@ -401,21 +427,38 @@ export default function PastePage() {
             aria-label="Paste content"
             className="w-full h-[70vh] sm:h-[75vh] resize-y rounded-md p-4 pt-12 bg-transparent border border-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/40 font-mono text-base sm:text-sm"
           />
-          <div className="absolute top-2 left-4 pointer-events-none">
-            <span className="text-sm opacity-70 font-mono">
-              Peers: {connectedPeers}
-            </span>
+          <div className="absolute top-2 left-4 pointer-events-none z-20">
+            <div className="relative inline-flex">
+              <span className="relative inline-flex items-center rounded overflow-hidden py-1 text-sm font-mono">
+                <span className="relative z-10 opacity-70">
+                  Peers: {connectedPeers}
+                </span>
+                <span
+                  className="pointer-events-none absolute inset-0 bg-black/40 backdrop-blur-sm"
+                  aria-hidden="true"
+                />
+              </span>
+            </div>
           </div>
-          <div className="absolute top-2 right-4 pointer-events-none">
-            <span
-              className={`inline-flex items-center rounded-full px-2 py-1 text-xs font-medium font-mono ${
-                connected
-                  ? "bg-green-500/10 text-green-400"
-                  : "bg-yellow-500/10 text-yellow-400 animate-pulse"
-              }`}
-            >
-              {connected ? "Connected" : "Connecting"}
-            </span>
+          <div className="absolute top-2 right-4 pointer-events-none z-20">
+            <div className="relative inline-flex px-1">
+              <span
+                className={`relative inline-flex items-center rounded-full overflow-hidden px-2 py-1 text-xs font-mono ${
+                  connected
+                    ? "bg-green-500/30 text-green-300"
+                    : "bg-yellow-500/30 text-yellow-300 animate-pulse"
+                }`}
+              >
+                <span className="relative z-10">
+                  {connected ? "Connected" : "Connecting"}
+                </span>
+
+                <span
+                  className="pointer-events-none absolute inset-0 backdrop-blur-sm"
+                  aria-hidden="true"
+                />
+              </span>
+            </div>
           </div>
         </div>
       </main>
