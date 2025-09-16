@@ -1,16 +1,5 @@
-import { Geist, Geist_Mono } from "next/font/google";
 import { useRouter } from "next/router";
 import { generateHumanSlug } from "@/lib/slug";
-
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
 
 export default function Home() {
   const router = useRouter();
@@ -21,9 +10,7 @@ export default function Home() {
   };
 
   return (
-    <div
-      className={`${geistSans.className} ${geistMono.className} font-sans min-h-screen flex items-center justify-center p-8`}
-    >
+    <div className="min-h-screen flex items-center justify-center p-8">
       <main className="w-full max-w-2xl">
         <div className="flex flex-col items-center gap-6 text-center">
           <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight">
