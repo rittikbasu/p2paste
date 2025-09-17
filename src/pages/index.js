@@ -1,13 +1,52 @@
+import { useState } from "react";
 import { useRouter } from "next/router";
 import { generateHumanSlug } from "@/lib/slug";
+import { checksumForWords, isAdjective, isAnimal } from "@/lib/slug";
 
 export default function Home() {
   const router = useRouter();
+  const [joining, setJoining] = useState(false);
+  const [word1, setWord1] = useState("");
+  const [word2, setWord2] = useState("");
+  const [word3, setWord3] = useState("");
+  const [joinError, setJoinError] = useState("");
+
+  const onSubmitJoinForm = (e) => {
+    try {
+      e?.preventDefault?.();
+    } catch {}
+    if (canJoin) onJoin();
+  };
 
   const createNewPaste = () => {
     const slug = generateHumanSlug();
     router.push(`/p/${slug}`);
   };
+
+  const onJoin = () => {
+    const a = word1.trim().toLowerCase();
+    const b = word2.trim().toLowerCase();
+    const c = word3.trim().toLowerCase();
+    if (!a || !b || !c) return;
+    const aIsAdj = isAdjective(a);
+    const aIsAni = isAnimal(a);
+    const bIsAdj = isAdjective(b);
+    const bIsAni = isAnimal(b);
+
+    const sum = checksumForWords(a, b);
+    const okTypes = (aIsAdj && bIsAni) || (aIsAni && bIsAdj);
+    if (okTypes && c === sum) {
+      setJoinError("");
+      router.push(`/p/${a}-${b}-${c}`);
+      return;
+    }
+    setJoinError("Those words don’t look right. Try again.");
+  };
+
+  const canJoin =
+    word1.trim().length > 0 &&
+    word2.trim().length > 0 &&
+    word3.trim().length === 4;
 
   return (
     <div className="h-dvh flex items-center justify-center p-8 relative">
@@ -16,21 +55,158 @@ export default function Home() {
           <h1 className="text-4xl sm:text-3xl font-semibold tracking-tight">
             P2Paste
           </h1>
-          <p className="opacity-70 text-base sm:text-lg">
-            Realtime, peer‑to‑peer pastebin. No servers. No Database. No
-            Bullshit.
-          </p>
-          <div>
-            <button
-              onClick={createNewPaste}
-              className="rounded-md border border-white/20 bg-foreground text-background px-4 py-2 text-sm sm:text-base hover:opacity-90"
-            >
-              New paste
-            </button>
-          </div>
+          {!joining && (
+            <>
+              <p className="opacity-70 text-base sm:text-lg">
+                Realtime, peer‑to‑peer pastebin.
+                <br className="sm:hidden" /> No servers. No Database. No
+                Bullshit.
+              </p>
+              <div className="flex flex-col items-center gap-4">
+                <button
+                  onClick={createNewPaste}
+                  className="rounded-md border border-white/20 bg-foreground text-background px-4 py-2 text-sm sm:text-base hover:opacity-90 cursor-pointer"
+                >
+                  New pastebin
+                </button>
+                <button
+                  onClick={() => setJoining(true)}
+                  className="text-sm underline underline-offset-2 decoration-solid opacity-80 hover:opacity-100"
+                >
+                  Join pastebin?
+                </button>
+              </div>
+            </>
+          )}
+          {joining && (
+            <div className="w-full">
+              <p className="opacity-80 mb-4 text-base sm:text-lg">
+                Enter the three magic words to join.
+              </p>
+              <form onSubmit={onSubmitJoinForm}>
+                <div className="grid grid-cols-2 gap-3 sm:gap-4 md:flex md:flex-nowrap md:items-end md:justify-center">
+                  <div className="col-span-1 md:w-36 text-left">
+                    <label className="block text-xs opacity-70 mb-1">
+                      Word 1
+                    </label>
+                    <input
+                      autoFocus
+                      value={word1}
+                      onChange={(e) => {
+                        setJoinError("");
+                        setWord1(
+                          e.target.value.replace(/[^a-z]/gi, "").toLowerCase()
+                        );
+                      }}
+                      className="w-full rounded-md bg-transparent border border-white/20 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-600/40"
+                      placeholder="e.g. blue"
+                      inputMode="text"
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
+                    />
+                  </div>
+                  <div className="col-span-1 md:w-36 text-left">
+                    <label className="block text-xs opacity-70 mb-1">
+                      Word 2
+                    </label>
+                    <input
+                      value={word2}
+                      onChange={(e) => {
+                        setJoinError("");
+                        setWord2(
+                          e.target.value.replace(/[^a-z]/gi, "").toLowerCase()
+                        );
+                      }}
+                      className="w-full rounded-md bg-transparent border border-white/20 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-600/40"
+                      placeholder="e.g. tiger"
+                      inputMode="text"
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
+                    />
+                  </div>
+                  <div className="col-span-1 md:w-36 text-left">
+                    <label className="block text-xs opacity-70 mb-1">
+                      Word 3
+                    </label>
+                    <input
+                      value={word3}
+                      onChange={(e) => {
+                        setJoinError("");
+                        setWord3(
+                          e.target.value
+                            .replace(/[^a-z]/gi, "")
+                            .toLowerCase()
+                            .slice(0, 4)
+                        );
+                      }}
+                      className="w-full rounded-md bg-transparent border border-white/20 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-600/40"
+                      placeholder="eg. abcd"
+                      maxLength={4}
+                      inputMode="text"
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
+                    />
+                  </div>
+                  <div className="col-span-1 md:w-auto md:min-w-fit">
+                    <label
+                      className="block text-xs opacity-0 mb-1 select-none"
+                      aria-hidden="true"
+                    >
+                      Join
+                    </label>
+                    <button
+                      type="submit"
+                      disabled={!canJoin}
+                      className="w-full md:w-auto rounded-md border border-white/20 px-4 py-2 hover:bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Join pastebin
+                    </button>
+                  </div>
+                </div>
+                {joinError && (
+                  <div
+                    className="mt-4 text-sm text-red-400 w-full flex items-center justify-center gap-2 text-center"
+                    aria-live="polite"
+                  >
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      width="18"
+                      height="18"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      className="lucide lucide-frown-icon lucide-frown"
+                      aria-hidden="true"
+                      focusable="false"
+                    >
+                      <circle cx="12" cy="12" r="10" />
+                      <path d="M16 16s-1.5-2-4-2-4 2-4 2" />
+                      <line x1="9" x2="9.01" y1="9" y2="9" />
+                      <line x1="15" x2="15.01" y1="9" y2="9" />
+                    </svg>
+                    <span>{joinError}</span>
+                  </div>
+                )}
+              </form>
+              <div className="mt-3 text-center">
+                <button
+                  onClick={createNewPaste}
+                  className="text-sm underline underline-offset-2 decoration-solid opacity-80 hover:opacity-100 cursor-pointer"
+                >
+                  New pastebin?
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </main>
-      <footer className="absolute inset-x-0 bottom-4 flex items-center justify-center sm:text-sm text-foreground/50 hover:text-foreground/80 transition-colors group">
+      <footer className="absolute inset-x-0 bottom-4 flex items-center justify-center text-foreground/50 hover:text-foreground/80 transition-colors group">
         <span className="select-none flex items-center gap-1">
           made with
           <svg
