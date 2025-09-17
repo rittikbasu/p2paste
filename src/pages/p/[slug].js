@@ -26,7 +26,7 @@ export default function PastePage() {
     async function start() {
       // Prevent duplicate start in StrictMode or fast re-mounts
       if (startedRef.current) {
-        return () => {};
+        return;
       }
       startedRef.current = true;
       const [{ Doc, applyUpdate, encodeStateAsUpdate }, yTextarea, torrent] =
@@ -128,6 +128,14 @@ export default function PastePage() {
           if (next > 0) setConnected(true);
           return next;
         });
+        // Proactively send the current full document state to the newly joined peer
+        try {
+          const full = encodeStateAsUpdate(doc);
+          sendFullState(full, peerId);
+          console.info("[p2paste] sent full state to", peerId);
+        } catch (err) {
+          console.warn("[p2paste] failed to proactively send full state", err);
+        }
       });
       if (typeof offJoin === "function") unsubsRef.current.push(offJoin);
 
@@ -248,7 +256,7 @@ export default function PastePage() {
     let kickoffTimeoutId = null;
 
     const kickoff = () => {
-      if (canceled) return;
+      if (canceled || startedRef.current) return;
       stopPromise = start();
     };
 
