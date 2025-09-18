@@ -1,11 +1,34 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/router";
 import { generateHumanSlug } from "@/lib/slug";
+import dynamic from "next/dynamic";
 
 // Defer requiring yjs and y-webrtc to client-side only
 const isBrowser = typeof window !== "undefined";
 
-export default function PastePage() {
+// Hoisted tracker and ICE configuration
+const RELAY_URLS = [
+  "wss://tracker.webtorrent.dev",
+  "wss://tracker.openwebtorrent.com",
+  "wss://tracker.ghostchu-services.top/announce",
+];
+
+const ICE_SERVERS = [
+  {
+    urls: [
+      "stun:stun.l.google.com:19302",
+      "stun:stun1.l.google.com:19302",
+      "stun:stun2.l.google.com:19302",
+      "stun:stun3.l.google.com:19302",
+      "stun:stun4.l.google.com:19302",
+    ],
+  },
+  { urls: "stun:global.stun.twilio.com:3478" },
+];
+
+const RTC_CONFIG = { iceServers: ICE_SERVERS, iceCandidatePoolSize: 0 };
+
+function PastePage() {
   const router = useRouter();
   const { slug } = router.query;
 
@@ -29,12 +52,21 @@ export default function PastePage() {
         return;
       }
       startedRef.current = true;
-      const [{ Doc, applyUpdate, encodeStateAsUpdate }, yTextarea, torrent] =
-        await Promise.all([
+      let Doc, applyUpdate, encodeStateAsUpdate, yTextarea, torrent;
+      try {
+        const results = await Promise.all([
           import("yjs"),
           import("y-textarea"),
           import("trystero/torrent"),
         ]);
+        ({ Doc, applyUpdate, encodeStateAsUpdate } = results[0]);
+        yTextarea = results[1];
+        torrent = results[2];
+      } catch (err) {
+        console.error("[p2paste] failed to load deps", err);
+        startedRef.current = false;
+        return;
+      }
 
       const roomName = `p2paste-${slug}`;
 
@@ -46,24 +78,8 @@ export default function PastePage() {
 
       const { joinRoom, getRelaySockets } = torrent;
 
-      const relayUrls = [
-        "wss://tracker.webtorrent.dev",
-        "wss://tracker.openwebtorrent.com",
-        "wss://tracker.files.fm:7073",
-      ];
-
-      const iceServers = [
-        {
-          urls: [
-            "stun:stun.l.google.com:19302",
-            "stun:stun1.l.google.com:19302",
-            "stun:stun2.l.google.com:19302",
-            "stun:stun3.l.google.com:19302",
-            "stun:stun4.l.google.com:19302",
-          ],
-        },
-        { urls: "stun:global.stun.twilio.com:3478" },
-      ];
+      const relayUrls = RELAY_URLS;
+      const iceServers = ICE_SERVERS;
 
       console.info("[p2paste] using trackers", relayUrls);
       console.info(
@@ -73,25 +89,97 @@ export default function PastePage() {
         )
       );
 
-      const room = joinRoom(
-        {
-          appId: "p2paste",
-          relayUrls,
-          relayRedundancy: 3,
-          // Keep RTC candidate pool small to avoid resource spikes during reconnects
-          rtcConfig: { iceServers, iceCandidatePoolSize: 2 },
-        },
-        roomName
-      );
+      // Guard: ensure the browser can allocate at least one RTCPeerConnection before joining
+      async function waitForRTCCapacity(rtcCfg, maxAttempts = 6) {
+        for (let i = 0; i < maxAttempts; i++) {
+          try {
+            const test = new RTCPeerConnection(rtcCfg);
+            test.close();
+            return true;
+          } catch (err) {
+            const msg = String(err?.message || err || "");
+            const name = err?.name || "";
+            // Retry only for quota-like errors
+            const quotaLike =
+              name === "UnknownError" ||
+              /Cannot create so many PeerConnections/i.test(msg);
+            if (!quotaLike) throw err;
+            await new Promise((r) => setTimeout(r, 500 + i * 300));
+          }
+        }
+        return false;
+      }
+
+      const rtcConfig = RTC_CONFIG;
+
+      let room;
+      try {
+        const ok = await waitForRTCCapacity(rtcConfig);
+        if (!ok) {
+          console.error(
+            "[p2paste] joinRoom aborted: RTCPeerConnection quota not yet available"
+          );
+          startedRef.current = false;
+          return;
+        }
+        room = joinRoom(
+          {
+            appId: "p2paste",
+            relayUrls,
+            // Keep RTC candidate pool small to avoid resource spikes during reconnects
+            rtcConfig,
+          },
+          roomName
+        );
+      } catch (err) {
+        console.error("[p2paste] joinRoom failed", err);
+        startedRef.current = false;
+        return;
+      }
       roomRef.current = room;
       const [sendUpdate, onUpdate] = room.makeAction("yupdate");
       const [sendFullState, onFullState] = room.makeAction("yfull");
       const [sendRequestFull, onRequestFull] = room.makeAction("yreq");
+      let hasSynced = false;
 
       // Broadcast local Yjs updates (incremental)
+      // Batch local updates per frame to reduce network chatter
+      const queuedUpdates = [];
+      let flushScheduled = false;
+      const scheduleFlush = () => {
+        if (flushScheduled) return;
+        flushScheduled = true;
+        const schedule =
+          typeof window !== "undefined" && window.requestAnimationFrame
+            ? window.requestAnimationFrame
+            : (cb) => setTimeout(cb, 16);
+        schedule(() => {
+          try {
+            if (queuedUpdates.length > 0) {
+              // Lazy import yjs mergeUpdates to avoid extra bundle weight upfront
+              import("yjs").then(({ mergeUpdates }) => {
+                try {
+                  const merged = mergeUpdates(queuedUpdates.splice(0));
+                  sendUpdate(merged);
+                } catch (err) {
+                  console.warn("[p2paste] failed to merge updates", err);
+                } finally {
+                  flushScheduled = false;
+                }
+              });
+            } else {
+              flushScheduled = false;
+            }
+          } catch {
+            flushScheduled = false;
+          }
+        });
+      };
+
       const onLocalUpdate = (update, origin) => {
         if (origin === "remote") return;
-        sendUpdate(update);
+        queuedUpdates.push(update);
+        scheduleFlush();
       };
       doc.on("update", onLocalUpdate);
 
@@ -101,6 +189,7 @@ export default function PastePage() {
       const offUpdate = onUpdate((update) => {
         try {
           applyUpdate(doc, update, "remote");
+          hasSynced = true;
         } catch (err) {
           console.warn(
             "[p2paste] failed to apply remote incremental update",
@@ -114,6 +203,7 @@ export default function PastePage() {
       const offFull = onFullState((update) => {
         try {
           applyUpdate(doc, update, "remote");
+          hasSynced = true;
         } catch (err) {
           console.warn("[p2paste] failed to apply full document state", err);
         }
@@ -121,20 +211,39 @@ export default function PastePage() {
       if (typeof offFull === "function") unsubsRef.current.push(offFull);
 
       // Presence: track peer joins/leaves and send full state to the new peer
-      const offJoin = room.onPeerJoin((peerId) => {
-        console.info("[p2paste] peer joined", peerId);
+      const peerDeltaRef = { current: 0 };
+      let peersFlushId = null;
+      const flushPeers = () => {
+        const delta = peerDeltaRef.current;
+        if (!delta) return;
+        peerDeltaRef.current = 0;
         setConnectedPeers((n) => {
-          const next = n + 1;
+          const next = Math.max(0, n + delta);
           if (next > 0) setConnected(true);
+          if (next === 0) setConnected(false);
           return next;
         });
-        // Proactively send the current full document state to the newly joined peer
+      };
+      const schedulePeersFlush = () => {
+        if (peersFlushId != null) return;
+        const schedule =
+          typeof window !== "undefined" && window.requestAnimationFrame
+            ? window.requestAnimationFrame
+            : (cb) => setTimeout(cb, 16);
+        peersFlushId = schedule(() => {
+          peersFlushId = null;
+          flushPeers();
+        });
+      };
+      const offJoin = room.onPeerJoin((peerId) => {
+        console.info("[p2paste] peer joined", peerId);
+        peerDeltaRef.current += 1;
+        schedulePeersFlush();
+        // If we still haven't synced, explicitly request full state from the new peer
         try {
-          const full = encodeStateAsUpdate(doc);
-          sendFullState(full, peerId);
-          console.info("[p2paste] sent full state to", peerId);
+          if (!hasSynced) sendRequestFull({}, peerId);
         } catch (err) {
-          console.warn("[p2paste] failed to proactively send full state", err);
+          console.warn("[p2paste] failed to request full state from peer", err);
         }
       });
       if (typeof offJoin === "function") unsubsRef.current.push(offJoin);
@@ -147,6 +256,17 @@ export default function PastePage() {
           console.warn("[p2paste] failed to request full state", err);
         }
       }, 0);
+
+      // Retry requesting full state until we receive some state
+      const retryFullIntervalId = setInterval(() => {
+        try {
+          if (!hasSynced) {
+            sendRequestFull({});
+          } else {
+            clearInterval(retryFullIntervalId);
+          }
+        } catch {}
+      }, 1200);
 
       const offReq = onRequestFull((_, fromPeerId) => {
         console.info("[p2paste] received full-state request from", fromPeerId);
@@ -164,11 +284,8 @@ export default function PastePage() {
       if (typeof offReq === "function") unsubsRef.current.push(offReq);
       const offLeave = room.onPeerLeave((peerId) => {
         console.info("[p2paste] peer left", peerId);
-        setConnectedPeers((n) => {
-          const next = Math.max(0, n - 1);
-          if (next === 0) setConnected(false);
-          return next;
-        });
+        peerDeltaRef.current -= 1;
+        schedulePeersFlush();
       });
       if (typeof offLeave === "function") unsubsRef.current.push(offLeave);
 
@@ -182,14 +299,35 @@ export default function PastePage() {
       // TextAreaBinding reflects Y.Text changes; no extra UI writer needed
 
       // Proactive cleanup on pagehide/visibilitychange
+      const closePeerConnections = () => {
+        try {
+          const peers = room?.getPeers?.();
+          if (peers) {
+            Object.values(peers).forEach((pc) => {
+              try {
+                pc.close();
+              } catch {}
+            });
+          }
+        } catch {}
+      };
+
       const onPageHide = () => {
         try {
+          closePeerConnections();
           room.leave();
         } catch (err) {
           console.warn("[p2paste] room.leave failed on pagehide", err);
         }
       };
       window.addEventListener("pagehide", onPageHide);
+      const onBeforeUnload = () => {
+        try {
+          closePeerConnections();
+          room.leave();
+        } catch {}
+      };
+      window.addEventListener("beforeunload", onBeforeUnload);
 
       return () => {
         // Unsubscribe Trystero handlers
@@ -212,7 +350,11 @@ export default function PastePage() {
         try {
           clearTimeout(requestFullTimeoutId);
         } catch {}
+        try {
+          clearInterval(retryFullIntervalId);
+        } catch {}
         window.removeEventListener("pagehide", onPageHide);
+        window.removeEventListener("beforeunload", onBeforeUnload);
         if (
           bindingRef.current &&
           typeof bindingRef.current.destroy === "function"
@@ -224,6 +366,7 @@ export default function PastePage() {
           }
         }
         try {
+          closePeerConnections();
           room.leave();
         } catch (err) {
           console.warn("[p2paste] room.leave failed during cleanup", err);
@@ -249,15 +392,18 @@ export default function PastePage() {
       };
     }
 
-    const devDelayMs = process.env.NODE_ENV === "development" ? 400 : 0;
+    const devDelayMs = 0;
     let stopPromise = null;
     let canceled = false;
     let idleId = null;
     let kickoffTimeoutId = null;
+    let absoluteKickId = null;
 
     const kickoff = () => {
       if (canceled || startedRef.current) return;
-      stopPromise = start();
+      stopPromise = start().catch((err) => {
+        console.error("[p2paste] startup error", err);
+      });
     };
 
     if (typeof window !== "undefined" && "requestIdleCallback" in window) {
@@ -267,6 +413,19 @@ export default function PastePage() {
     } else {
       kickoffTimeoutId = setTimeout(kickoff, devDelayMs);
     }
+
+    // Absolute fallback in case requestIdleCallback never fires (background tabs, heavy load)
+    absoluteKickId = setTimeout(kickoff, Math.max(800, devDelayMs + 600));
+
+    // If tab becomes visible and we haven't started, kick off immediately
+    const onVisibility = () => {
+      try {
+        if (!document.hidden) kickoff();
+      } catch {}
+    };
+    try {
+      document.addEventListener("visibilitychange", onVisibility);
+    } catch {}
 
     return () => {
       canceled = true;
@@ -281,6 +440,12 @@ export default function PastePage() {
       } catch {}
       try {
         if (kickoffTimeoutId) clearTimeout(kickoffTimeoutId);
+      } catch {}
+      try {
+        if (absoluteKickId) clearTimeout(absoluteKickId);
+      } catch {}
+      try {
+        document.removeEventListener("visibilitychange", onVisibility);
       } catch {}
       // If start returned a cleanup promise, await it (ignored)
       Promise.resolve(stopPromise).then((cleanup) => {
@@ -332,7 +497,7 @@ export default function PastePage() {
   };
 
   return (
-    <div className="min-h-screen flex flex-col p-4 sm:p-8 gap-4 w-full max-w-5xl mx-auto">
+    <div className="h-dvh flex flex-col p-4 sm:p-8 gap-4 w-full max-w-5xl mx-auto">
       <div className="flex items-center justify-between">
         <h1 className="text-xl sm:text-2xl font-medium tracking-tight">
           P2Paste
@@ -342,7 +507,7 @@ export default function PastePage() {
           className="rounded-md border border-white/20 bg-foreground text-background px-3 py-1 text-sm shadow-sm hover:opacity-90"
           aria-label="Create new paste"
         >
-          Create new paste
+          New pastebin
         </button>
       </div>
       <header className="grid grid-cols-[1fr_auto] items-center gap-2 sm:gap-3 sm:flex sm:justify-between rounded-md pt-3">
@@ -433,23 +598,23 @@ export default function PastePage() {
             id="content"
             name="content"
             aria-label="Paste content"
-            className="w-full h-[70vh] sm:h-[75vh] resize-y rounded-md p-4 pt-12 bg-transparent border border-white/20 focus:outline-none focus:ring-2 focus:ring-blue-500/40 font-mono text-base sm:text-sm"
+            className="w-full h-[70vh] sm:h-[75vh] resize-y rounded-md p-4 py-12 bg-transparent border border-white/20 focus:outline-none focus:ring-2 focus:ring-blue-600/40 font-mono text-base sm:text-sm caret-blue-400 "
           />
           <div className="absolute top-2 left-4 pointer-events-none z-20">
             <div className="relative inline-flex">
-              <span className="relative inline-flex items-center rounded overflow-hidden py-1 text-sm font-mono">
+              <span className="relative inline-flex items-center rounded overflow-hidden py-0.5 text-sm font-mono">
                 <span className="relative z-10 opacity-70">
                   Peers: {connectedPeers}
                 </span>
                 <span
-                  className="pointer-events-none absolute inset-0 bg-black/40 backdrop-blur-sm"
+                  className="pointer-events-none absolute inset-0 bg-zinc-950/40 backdrop-blur-sm"
                   aria-hidden="true"
                 />
               </span>
             </div>
           </div>
           <div className="absolute top-2 right-4 pointer-events-none z-20">
-            <div className="relative inline-flex px-1">
+            <div className="relative inline-flex">
               <span
                 className={`relative inline-flex items-center rounded-full overflow-hidden px-2 py-1 text-xs font-mono ${
                   connected
@@ -471,8 +636,11 @@ export default function PastePage() {
         </div>
       </main>
       <footer className="text-xs sm:text-sm opacity-60">
-        Everything exists in your browser only while you&apos;re here.
+        Everything exists in your browser only while you&apos;re here. Once you
+        and all other peers leave, the pasted text will cease to exist.
       </footer>
     </div>
   );
 }
+
+export default dynamic(() => Promise.resolve(PastePage), { ssr: false });
